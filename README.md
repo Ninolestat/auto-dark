@@ -1,29 +1,29 @@
 # AutoDark
 
-Applicazione nativa Win32 ultra-leggera per Windows 10/11 che cambia automaticamente tra tema **Chiaro** e **Scuro** (e opzionalmente lo sfondo del desktop) all'alba/tramonto o a un orario fisso.
+Ultra-lightweight native Win32 application for Windows 10/11 that automatically switches between **Light** and **Dark** mode (and optionally desktop wallpapers) at sunrise/sunset or on a fixed schedule.
 
-- **Consumo RAM minimo in systray:** ~`0.2 MB` Working Set / ~`2.6 MB` Private Memory
-- **Eseguibile portatile:** ~`85 KB` (zero dipendenze esterne, scritta in C puro con Win32 API)
-- **Installer incluso:** ~`156 KB` (`AutoDarkSetup.exe`) con supporto a *Avvio automatico con Windows* in systray e disinstallazione pulita da *App installate*
+- **Minimal RAM footprint in systray:** ~`0.2 MB` Working Set / ~`2.6 MB` Private Memory
+- **Portable executable:** ~`86 KB` (zero external dependencies, written in pure C with the Win32 API)
+- **Standalone installer:** ~`157 KB` (`AutoDarkSetup.exe`) with *Start with Windows* (systray) and clean *Installed Apps* uninstallation support
 
-## Funzionalità
+## Features
 
-- **Alba / Tramonto automatico:** calcolo astronomico locale (algoritmo NOAA) senza chiamate di rete né permessi di geolocalizzazione, con 20 città preimpostate.
-- **Orario fisso:** programmazione rapida per tema Chiaro e Scuro.
-- **Cambio sfondo opzionale:** preimpostato su `C:\Windows\Web\Wallpaper\Windows\img0.jpg` (Chiaro) e `img19.jpg` (Scuro), personalizzabile con qualsiasi immagine.
-- **Tasti rapidi:** switch immediato `Chiaro` / `Scuro` dal popup o dal menu della systray.
-- **Grafica minimale adattiva:** popup con angoli arrotondati di Windows 11 che si adatta automaticamente al tema Chiaro o Scuro attivo.
+- **Automatic Sunrise / Sunset:** local astronomical calculation (NOAA solar algorithm) with zero network requests or location permissions, including 20 built-in city presets.
+- **Fixed Schedule:** quick 15-minute steppers for Light and Dark transition times.
+- **Optional Wallpaper Switching:** preconfigured for `C:\Windows\Web\Wallpaper\Windows\img0.jpg` (Light) and `img19.jpg` (Dark), customizable with any image.
+- **Quick Theme Switch:** instant `Light` / `Dark` buttons in the popup and systray context menu.
+- **Minimal Adaptive UI:** Windows 11 rounded-corner popup that adapts to the active Light/Dark theme with smooth fade-in/fade-out and animated toggles.
 
-## Installazione
+## Installation
 
-Scarica `AutoDarkSetup.exe` dalla sezione [Releases](../../releases) ed eseguilo.
+Download `AutoDarkSetup.exe` from [Releases](../../releases) and run it.
 
-## Compilazione da sorgente
+## Building from Source
 
-Requisiti: [Zig](https://ziglang.org/) (`zig cc`) su Windows.
+Requirements: [Zig](https://ziglang.org/) (`zig cc`) on Windows.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-Genera `build/AutoDark.exe` e l'installer autonomo `build/AutoDarkSetup.exe`.
+Outputs `build/AutoDark.exe` and the self-contained `build/AutoDarkSetup.exe` installer.
