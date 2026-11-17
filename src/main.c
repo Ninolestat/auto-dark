@@ -24,6 +24,8 @@
 #define WM_TRAYICON       (WM_APP + 1)
 #define WM_SHOW_POPUP     (WM_APP + 2)
 #define TIMER_SCHEDULE    1
+#define TIMER_FADE        2
+#define TIMER_ANIM        3
 #define ID_TRAY_ICON      100
 
 // Context menu IDs
@@ -75,6 +77,13 @@ static UINT           g_dpi = 96;
 static HitRegion      g_hover = HIT_NONE;
 static UINT           g_msgTaskbarCreated = 0;
 static BOOL           g_inDialog = FALSE;
+
+// Animation state (zero-RAM when idle, timers auto-stop)
+static int            g_fadeAlpha = 0;
+static int            g_fadeDir   = 0; // +1 fading in, -1 fading out, 0 idle
+static float          g_animAuto  = 1.0f;
+static float          g_animWall  = 0.0f;
+static float          g_animMode  = 0.0f;
 
 // Logical dimensions (96 DPI)
 static const int WIN_W = 320;
@@ -155,19 +164,35 @@ static void PositionWindowNearTray(HWND hwnd) {
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
 }
 
+static void StartUiAnim(void) {
+    SetTimer(g_hwnd, TIMER_ANIM, 15, NULL);
+}
+
 static void ShowPopup(void) {
     g_curLight = IsSystemLightTheme();
     g_startup  = IsStartupEnabled();
     EvaluateSchedule(FALSE);
+
+    g_animAuto = g_cfg.enabled ? 1.0f : 0.0f;
+    g_animWall = g_cfg.changeWallpaper ? 1.0f : 0.0f;
+    g_animMode = (g_cfg.mode == MODE_FIXED) ? 1.0f : 0.0f;
+
     PositionWindowNearTray(g_hwnd);
-    ShowWindow(g_hwnd, SW_SHOW);
+    if (!IsWindowVisible(g_hwnd)) {
+        g_fadeAlpha = 0;
+        SetLayeredWindowAttributes(g_hwnd, 0, 0, LWA_ALPHA);
+        ShowWindow(g_hwnd, SW_SHOW);
+    }
+    g_fadeDir = 1;
+    SetTimer(g_hwnd, TIMER_FADE, 15, NULL);
     SetForegroundWindow(g_hwnd);
     InvalidateRect(g_hwnd, NULL, FALSE);
 }
 
 static void HidePopup(void) {
-    ShowWindow(g_hwnd, SW_HIDE);
-    TrimMemory();
+    if (!IsWindowVisible(g_hwnd) || g_fadeDir == -1) return;
+    g_fadeDir = -1;
+    SetTimer(g_hwnd, TIMER_FADE, 15, NULL);
 }
 
 // Compute layout rectangles in client coordinates
@@ -277,17 +302,28 @@ static HFONT MakeFont(int ptSize, int weight) {
                        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 }
 
-static void DrawToggleSwitch(HDC hdc, const RECT *rc, BOOL on, BOOL hover, BOOL darkUI) {
+static COLORREF LerpColor(COLORREF a, COLORREF b, float t) {
+    if (t <= 0.0f) return a;
+    if (t >= 1.0f) return b;
+    int r = (int)((float)GetRValue(a) + ((float)GetRValue(b) - (float)GetRValue(a)) * t + 0.5f);
+    int g = (int)((float)GetGValue(a) + ((float)GetGValue(b) - (float)GetGValue(a)) * t + 0.5f);
+    int bl = (int)((float)GetBValue(a) + ((float)GetBValue(b) - (float)GetBValue(a)) * t + 0.5f);
+    return RGB(r, g, bl);
+}
+
+static void DrawToggleSwitch(HDC hdc, const RECT *rc, float pos, BOOL hover, BOOL darkUI) {
     int h = rc->bottom - rc->top;
     int w = rc->right - rc->left;
-    COLORREF track = on
-        ? (hover ? RGB(59, 130, 246) : RGB(37, 99, 235))
-        : (darkUI ? (hover ? RGB(72, 78, 92) : RGB(56, 61, 74)) : (hover ? RGB(190, 196, 206) : RGB(209, 213, 219)));
+    COLORREF cOff = darkUI ? (hover ? RGB(72, 78, 92) : RGB(56, 61, 74)) : (hover ? RGB(190, 196, 206) : RGB(209, 213, 219));
+    COLORREF cOn  = hover ? RGB(59, 130, 246) : RGB(37, 99, 235);
+    COLORREF track = LerpColor(cOff, cOn, pos);
     FillRoundRect(hdc, rc, h, track, CLR_INVALID);
 
     int pad = S(3);
     int knobD = h - pad * 2;
-    int kx = on ? (rc->right - pad - knobD) : (rc->left + pad);
+    int minX = rc->left + pad;
+    int maxX = rc->right - pad - knobD;
+    int kx = minX + (int)((float)(maxX - minX) * pos + 0.5f);
     int ky = rc->top + pad;
     RECT rk = { kx, ky, kx + knobD, ky + knobD };
     FillRoundRect(hdc, &rk, knobD, RGB(255, 255, 255), CLR_INVALID);
@@ -409,17 +445,16 @@ static void PaintWindow(HWND hwnd) {
     SetTextColor(hdc, cText);
     RECT rAutoLbl = { pad + S(12), S(118), w - pad - S(60), S(144) };
     DrawTextW(hdc, L"Cambio automatico", -1, &rAutoLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    DrawToggleSwitch(hdc, &rTogAuto, g_cfg.enabled, g_hover == HIT_TOGGLE_AUTO, dark);
+    DrawToggleSwitch(hdc, &rTogAuto, g_animAuto, g_hover == HIT_TOGGLE_AUTO, dark);
 
-    // Segmented control
+    // Segmented control (sliding pill)
     RECT rSegOuter = { pad + S(12), S(154), w - pad - S(12), S(188) };
     FillRoundRect(hdc, &rSegOuter, S(10), cSegBg, CLR_INVALID);
 
-    if (g_cfg.mode == MODE_SUN) {
-        FillRoundRect(hdc, &rSegSun, S(8), cCard, cBorder);
-    } else {
-        FillRoundRect(hdc, &rSegFixed, S(8), cCard, cBorder);
-    }
+    int segSlideX = rSegSun.left + (int)((float)(rSegFixed.left - rSegSun.left) * g_animMode + 0.5f);
+    int segPillW  = rSegSun.right - rSegSun.left;
+    RECT rSegPill = { segSlideX, rSegSun.top, segSlideX + segPillW, rSegSun.bottom };
+    FillRoundRect(hdc, &rSegPill, S(8), cCard, cBorder);
 
     SelectObject(hdc, g_cfg.mode == MODE_SUN ? fBold : fBody);
     SetTextColor(hdc, g_cfg.mode == MODE_SUN ? cText : cMuted);
@@ -492,7 +527,7 @@ static void PaintWindow(HWND hwnd) {
     SetTextColor(hdc, cText);
     RECT rWallLbl = { pad + S(12), S(306), w - pad - S(60), S(332) };
     DrawTextW(hdc, L"Cambia sfondo", -1, &rWallLbl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    DrawToggleSwitch(hdc, &rTogWall, g_cfg.changeWallpaper, g_hover == HIT_TOGGLE_WALL, dark);
+    DrawToggleSwitch(hdc, &rTogWall, g_animWall, g_hover == HIT_TOGGLE_WALL, dark);
 
     FillRoundRect(hdc, &rWallLight, S(8), g_hover == HIT_WALL_LIGHT ? cBtnHover : cSegBg, cBorder);
     FillRoundRect(hdc, &rWallDark,  S(8), g_hover == HIT_WALL_DARK  ? cBtnHover : cSegBg, cBorder);
@@ -633,6 +668,17 @@ static void AddTrayIcon(HWND hwnd) {
     UpdateTrayTooltip();
 }
 
+static BOOL StepAnim(float *val, float target) {
+    float diff = target - *val;
+    if (diff > -0.015f && diff < 0.015f) {
+        *val = target;
+        return FALSE;
+    }
+    // Smooth exponential ease-out (~6 frames at 15ms)
+    *val += diff * 0.28f;
+    return TRUE;
+}
+
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == g_msgTaskbarCreated && g_msgTaskbarCreated != 0) {
         AddTrayIcon(hwnd);
@@ -657,6 +703,39 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (wParam == TIMER_SCHEDULE) {
             EvaluateSchedule(FALSE);
             if (IsWindowVisible(hwnd)) InvalidateRect(hwnd, NULL, FALSE);
+        } else if (wParam == TIMER_FADE) {
+            if (g_fadeDir > 0) {
+                g_fadeAlpha += 32;
+                if (g_fadeAlpha >= 255) {
+                    g_fadeAlpha = 255;
+                    g_fadeDir = 0;
+                    KillTimer(hwnd, TIMER_FADE);
+                }
+                SetLayeredWindowAttributes(hwnd, 0, (BYTE)g_fadeAlpha, LWA_ALPHA);
+            } else if (g_fadeDir < 0) {
+                g_fadeAlpha -= 36;
+                if (g_fadeAlpha <= 0) {
+                    g_fadeAlpha = 0;
+                    g_fadeDir = 0;
+                    KillTimer(hwnd, TIMER_FADE);
+                    SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+                    ShowWindow(hwnd, SW_HIDE);
+                    TrimMemory();
+                } else {
+                    SetLayeredWindowAttributes(hwnd, 0, (BYTE)g_fadeAlpha, LWA_ALPHA);
+                }
+            } else {
+                KillTimer(hwnd, TIMER_FADE);
+            }
+        } else if (wParam == TIMER_ANIM) {
+            BOOL moving = FALSE;
+            moving |= StepAnim(&g_animAuto, g_cfg.enabled ? 1.0f : 0.0f);
+            moving |= StepAnim(&g_animWall, g_cfg.changeWallpaper ? 1.0f : 0.0f);
+            moving |= StepAnim(&g_animMode, (g_cfg.mode == MODE_FIXED) ? 1.0f : 0.0f);
+            InvalidateRect(hwnd, NULL, FALSE);
+            if (!moving) {
+                KillTimer(hwnd, TIMER_ANIM);
+            }
         }
         return 0;
 
@@ -754,14 +833,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             ConfigSave(&g_cfg);
             if (g_cfg.enabled) EvaluateSchedule(TRUE);
             else UpdateTrayTooltip();
-            InvalidateRect(hwnd, NULL, FALSE);
+            StartUiAnim();
             break;
         case HIT_SEG_SUN:
             if (g_cfg.mode != MODE_SUN) {
                 g_cfg.mode = MODE_SUN;
                 ConfigSave(&g_cfg);
                 EvaluateSchedule(TRUE);
-                InvalidateRect(hwnd, NULL, FALSE);
+                StartUiAnim();
             }
             break;
         case HIT_SEG_FIXED:
@@ -769,7 +848,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 g_cfg.mode = MODE_FIXED;
                 ConfigSave(&g_cfg);
                 EvaluateSchedule(TRUE);
-                InvalidateRect(hwnd, NULL, FALSE);
+                StartUiAnim();
             }
             break;
         case HIT_CITY_PREV:
@@ -819,21 +898,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_cfg.changeWallpaper = !g_cfg.changeWallpaper;
             ConfigSave(&g_cfg);
             if (g_cfg.changeWallpaper) ApplyWindowsTheme(g_curLight, &g_cfg);
-            InvalidateRect(hwnd, NULL, FALSE);
+            StartUiAnim();
             break;
         case HIT_WALL_LIGHT:
             PickWallpaperFile(hwnd, g_cfg.lightWallpaper, MAX_PATH);
             g_cfg.changeWallpaper = TRUE;
             ConfigSave(&g_cfg);
             if (g_curLight) ApplyWindowsTheme(TRUE, &g_cfg);
-            InvalidateRect(hwnd, NULL, FALSE);
+            StartUiAnim();
             break;
         case HIT_WALL_DARK:
             PickWallpaperFile(hwnd, g_cfg.darkWallpaper, MAX_PATH);
             g_cfg.changeWallpaper = TRUE;
             ConfigSave(&g_cfg);
             if (!g_curLight) ApplyWindowsTheme(FALSE, &g_cfg);
-            InvalidateRect(hwnd, NULL, FALSE);
+            StartUiAnim();
             break;
         case HIT_TOGGLE_STARTUP:
             g_startup = !g_startup;
@@ -891,6 +970,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_DESTROY:
         KillTimer(hwnd, TIMER_SCHEDULE);
+        KillTimer(hwnd, TIMER_FADE);
+        KillTimer(hwnd, TIMER_ANIM);
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         if (g_trayIcon) DestroyIcon(g_trayIcon);
         if (g_appIcon)  DestroyIcon(g_appIcon);
@@ -933,9 +1014,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR lpCmdLine, int nSho
     wc.lpszClassName = WND_CLASS;
     RegisterClassExW(&wc);
 
-    // WS_EX_TOOLWINDOW keeps it out of Alt+Tab and Taskbar
+    // WS_EX_TOOLWINDOW keeps it out of Alt+Tab and Taskbar; WS_EX_LAYERED enables smooth fade
     g_hwnd = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
         WND_CLASS, L"AutoDark",
         WS_POPUP,
         0, 0, S(WIN_W), S(WIN_H),
